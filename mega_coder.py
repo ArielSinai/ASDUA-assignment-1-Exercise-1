@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
-
 import os
 import sys
 import textwrap
 import traceback
 import runpy
 import random
+import time
 
 import google.generativeai as genai
 
@@ -16,7 +16,7 @@ MAX_FIX_ATTEMPTS = 5   # how many times we let Gemini try to fix errors
 
 
 def configure_gemini() -> None:
-    """Configure the Gemini client using the GOOGLE_API_KEY env variable."""
+   
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
         print(
@@ -33,12 +33,12 @@ def clean_code(text: str) -> str:
     code = text.strip()
 
     if code.startswith("```"):
-        # Remove the opening ``` or ```python
+        
         code = code.lstrip("`")
         parts = code.split("\n", 1)
         if len(parts) == 2:
             code = parts[1]
-        # Remove trailing ```
+        
         if "```" in code:
             code = code.rsplit("```", 1)[0]
 
@@ -55,8 +55,8 @@ def build_prompt(user_description: str) -> str:
 
     Hard requirements:
     - The program must be a single, self-contained Python file.
-    - The program must NOT use input() or any other interactive user input.
-    - The program must NOT rely on command line arguments (no sys.argv parsing).
+    - The program must not use input() or any other interactive user input.
+    - The program must not rely on command line arguments (no sys.argv parsing).
     - Instead, define any example data or configuration directly in the script
       so it can run from `python generated-code-gemini.py` without stopping.
 
@@ -69,7 +69,7 @@ def build_prompt(user_description: str) -> str:
       dedicated test/helper functions).
 
     Output format requirements:
-    - Return ONLY valid Python code.
+    - Return only valid Python code.
     - Do not include any explanations, comments outside the code, or markdown
       fences (no ``` blocks).
     """
@@ -90,7 +90,7 @@ def build_fix_prompt(
     Program description:
     {user_description}
 
-    Here is the current version of the script that was generated:
+    Here is the CURRENT version of the script that was generated:
 
     --- BEGIN CURRENT SCRIPT ---
     {previous_code}
@@ -102,17 +102,54 @@ def build_fix_prompt(
     {error_text}
     --- END ERROR ---
 
-    Please provide a fully corrected version of the script that:
+    Please provide a FULLY corrected version of the script that:
     - Fixes the error(s) above.
     - Still satisfies the original requirements and description.
     - Does not use input() or any other interactive user input.
     - Does not rely on command line arguments (no sys.argv parsing).
     - Keeps a main() function and an `if __name__ == "__main__":` block.
     - Contains assert statements that check the core logic and will fail if the
-     logic is wrong.
+      logic is wrong.
 
     Output format requirements:
-    - Return ONLY valid Python code.
+    - Return only valid Python code.
+    - Do not include any explanations, comments outside the code, or markdown
+      fences (no ``` blocks).
+    """
+    return textwrap.dedent(base_prompt).strip()
+
+
+def build_optimize_prompt(
+    user_description: str,
+    working_code: str,
+) -> str:
+    
+    base_prompt = f"""
+    You are an expert Python 3 performance engineer.
+
+    I have the following Python 3 script that already works correctly and
+    includes assert statements that validate the logic:
+
+    --- BEGIN CURRENT SCRIPT ---
+    {working_code}
+    --- END CURRENT SCRIPT ---
+
+    Original program description:
+    {user_description}
+
+    Please produce a new version of this script that:
+    - Is more efficient / faster in terms of execution time.
+    - Preserves EXACTLY the same assert statements (do not remove or weaken them).
+      You may reorder code or refactor functions, but the asserts must still check
+      the same logical conditions.
+    - Keeps the same external behavior and results.
+    - Does not introduce input() or any other interactive user input.
+    - Does not rely on command line arguments (no sys.argv parsing).
+    - Still defines a main() function and uses an
+      `if __name__ == "__main__":` block to run it.
+
+    Output format requirements:
+    - Return only valid Python code.
     - Do not include any explanations, comments outside the code, or markdown
       fences (no ``` blocks).
     """
@@ -120,7 +157,7 @@ def build_fix_prompt(
 
 
 def call_gemini_for_code(description: str) -> str:
-    """Send the initial creation prompt to Gemini and return the cleaned Python code."""
+    
     prompt = build_prompt(description)
     model = genai.GenerativeModel(MODEL_NAME)
 
@@ -144,7 +181,7 @@ def call_gemini_to_fix_code(
     previous_code: str,
     error_text: str,
 ) -> str:
-    """Ask Gemini to fix an existing script that produced an error."""
+    
     prompt = build_fix_prompt(description, previous_code, error_text)
     model = genai.GenerativeModel(MODEL_NAME)
 
@@ -163,9 +200,30 @@ def call_gemini_to_fix_code(
     return code
 
 
-# ---------------------------------------------------------------------------
-# Code corruption + execution helpers
-# ---------------------------------------------------------------------------
+def call_gemini_to_optimize_code(
+    description: str,
+    working_code: str,
+) -> str:
+    
+    prompt = build_optimize_prompt(description, working_code)
+    model = genai.GenerativeModel(MODEL_NAME)
+
+    print("[ Mega Coder ] Asking Gemini to optimize the program for speed...")
+    try:
+        response = model.generate_content(prompt)
+    except Exception as e:
+        print(f"ERROR: Gemini API call (optimize) failed: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not hasattr(response, "text") or not response.text:
+        print("ERROR: Gemini returned an empty response when optimizing.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    code = clean_code(response.text)
+    return code
+
+
 
 def maybe_corrupt_code(code: str, probability: float = 0.35) -> str:
     
@@ -195,7 +253,7 @@ def maybe_corrupt_code(code: str, probability: float = 0.35) -> str:
     char_idx = random.choice(non_ws_indices)
     original_char = line[char_idx]
 
-   
+    
     replacement_options = list("abcdefghijklmnopqrstuvwxyz_+-*/%0123456789")
     if original_char in replacement_options and len(replacement_options) > 1:
         replacement_options.remove(original_char)
@@ -219,25 +277,29 @@ def write_generated_code(code: str) -> None:
     print(f"[ Mega Coder ] Wrote generated code to: {GENERATED_FILE}")
 
 
-def run_generated_code() -> tuple[bool, str]:
+def run_generated_code() -> tuple[bool, str, float]:
     
     print(f"[ Mega Coder ] Running {GENERATED_FILE} to verify it executes...")
+    start = time.perf_counter()
     try:
         runpy.run_path(GENERATED_FILE, run_name="__main__")
     except Exception:
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
         tb = traceback.format_exc()
         print("\n[ Mega Coder ] ERROR: The generated program raised an exception.")
         print("This may indicate a failed assert or a bug in the code.\n")
         print(tb)
-        return False, tb
+        return False, tb, elapsed_ms
 
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
     print(
         "\n[ Mega Coder ] The generated program finished without uncaught exceptions."
     )
     print(
         "If asserts are written correctly, this suggests the logic is consistent."
     )
-    return True, ""
+    print(f"[ Mega Coder ] Execution time: {elapsed_ms:.3f} ms")
+    return True, "", elapsed_ms
 
 
 def generate_and_fix_until_ok(description: str) -> None:
@@ -247,20 +309,48 @@ def generate_and_fix_until_ok(description: str) -> None:
     for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
         print(f"\n[ Mega Coder ] ==== Attempt {attempt} of {MAX_FIX_ATTEMPTS} ====")
 
-        # Randomly corrupt code sometimes before writing it
         code_to_run = maybe_corrupt_code(code)
 
         write_generated_code(code_to_run)
-        success, error_text = run_generated_code()
+        success, error_text, elapsed_before_ms = run_generated_code()
 
         if success:
             print("\n[ Mega Coder ] Success! The generated program runs correctly.")
+
+            optimized_code = call_gemini_to_optimize_code(description, code_to_run)
+
+            print("\n[ Mega Coder ] Testing optimized version...")
+            write_generated_code(optimized_code)
+            success_opt, error_opt, elapsed_after_ms = run_generated_code()
+
+            if success_opt and elapsed_after_ms < elapsed_before_ms:
+                print(
+                    f"\nCode running time optimized! "
+                    f"It now runs in {elapsed_after_ms:.3f} milliseconds, "
+                    f"while before it was {elapsed_before_ms:.3f} milliseconds."
+                )
+            elif not success_opt:
+                print(
+                    "\n[ Mega Coder ] Optimized version failed to run correctly. "
+                    "Keeping the previous working version."
+                )
+                
+                write_generated_code(code_to_run)
+            else:
+                print(
+                    "\n[ Mega Coder ] Optimized version is not faster than the "
+                    "previous one. Keeping the previous working version."
+                )
+                
+                write_generated_code(code_to_run)
+
             return
 
         # If we still have attempts left, ask Gemini to fix the code
         if attempt < MAX_FIX_ATTEMPTS:
             code = call_gemini_to_fix_code(description, code_to_run, error_text)
         else:
+            
             print(
                 "\nSorry master, I have failed you. "
                 "I can't create this program without issues."
