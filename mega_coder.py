@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-
 import os
 import sys
 import textwrap
@@ -10,46 +9,47 @@ import random
 import time
 import subprocess
 
+from colorama import Fore, Style, init as colorama_init
+from tqdm import tqdm
+
 import google.generativeai as genai
 
 MODEL_NAME = "gemini-2.5-flash-lite"
 GENERATED_FILE = "generated-code-gemini.py"
-MAX_FIX_ATTEMPTS = 5       
-MAX_LINT_ATTEMPTS = 3       # pylint fix attempts
+MAX_FIX_ATTEMPTS = 5
+MAX_LINT_ATTEMPTS = 3
 
+def info(msg: str) -> None:
+    print(Fore.CYAN + msg + Style.RESET_ALL)
+
+def success(msg: str) -> None:
+    print(Fore.GREEN + msg + Style.RESET_ALL)
+
+def warning(msg: str) -> None:
+    print(Fore.YELLOW + msg + Style.RESET_ALL)
+
+def error(msg: str) -> None:
+    print(Fore.RED + msg + Style.RESET_ALL)
 
 def configure_gemini() -> None:
-    
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        print(
-            "ERROR: Please set the environment variable GOOGLE_API_KEY "
-            "with your Gemini API key.",
-            file=sys.stderr,
-        )
+        error("ERROR: Please set the environment variable GOOGLE_API_KEY with your Gemini API key.")
         sys.exit(1)
     genai.configure(api_key=api_key)
 
-
 def clean_code(text: str) -> str:
-    
     code = text.strip()
-
     if code.startswith("```"):
-        
         code = code.lstrip("`")
         parts = code.split("\n", 1)
         if len(parts) == 2:
             code = parts[1]
-        
         if "```" in code:
             code = code.rsplit("```", 1)[0]
-
     return code.strip()
 
-
 def build_prompt(user_description: str) -> str:
-    
     base_prompt = f"""
     You are an expert Python 3 developer.
 
@@ -78,13 +78,7 @@ def build_prompt(user_description: str) -> str:
     """
     return textwrap.dedent(base_prompt).strip()
 
-
-def build_fix_prompt(
-    user_description: str,
-    previous_code: str,
-    error_text: str,
-) -> str:
-    
+def build_fix_prompt(user_description: str, previous_code: str, error_text: str) -> str:
     base_prompt = f"""
     You are an expert Python 3 developer.
 
@@ -121,12 +115,7 @@ def build_fix_prompt(
     """
     return textwrap.dedent(base_prompt).strip()
 
-
-def build_optimize_prompt(
-    user_description: str,
-    working_code: str,
-) -> str:
-    
+def build_optimize_prompt(user_description: str, working_code: str) -> str:
     base_prompt = f"""
     You are an expert Python 3 performance engineer.
 
@@ -142,14 +131,7 @@ def build_optimize_prompt(
 
     Please produce a new version of this script that:
     - Is more efficient / faster in terms of execution time.
-    - Preserves exactly the same assert statements (do not remove or weaken them).
-      You may reorder code or refactor functions, but the asserts must still check
-      the same logical conditions.
-    - Keeps the same external behavior and results.
-    - Does not introduce input() or any other interactive user input.
-    - Does not rely on command line arguments (no sys.argv parsing).
-    - Still defines a main() function and uses an
-      `if __name__ == "__main__":` block to run it.
+    - Preserves exactly the same assert statements.
 
     Output format requirements:
     - Return only valid Python code.
@@ -158,25 +140,9 @@ def build_optimize_prompt(
     """
     return textwrap.dedent(base_prompt).strip()
 
-
-def build_lint_fix_prompt(
-    user_description: str,
-    current_code: str,
-    lint_output: str,
-) -> str:
-    
+def build_lint_fix_prompt(user_description: str, current_code: str, lint_output: str) -> str:
     base_prompt = f"""
     You are an expert Python 3 developer and style expert.
-
-    I have the following Python 3 script that already runs correctly and
-    includes assert statements:
-
-    --- BEGIN CURRENT SCRIPT ---
-    {current_code}
-    --- END CURRENT SCRIPT ---
-
-    Original program description:
-    {user_description}
 
     I ran pylint on this script and got the following warnings/errors:
 
@@ -184,353 +150,177 @@ def build_lint_fix_prompt(
     {lint_output}
     --- END PYLINT OUTPUT ---
 
-    Please return a new version of this script that:
-    - Fixes the pylint warnings/errors above.
-    - Keeps the same overall behavior and logic.
-    - Keeps all assert statements (you may move them, but they should still
-      check the same logical conditions).
-    - Does not add input() or any other interactive user input.
-    - Does not rely on command line arguments.
-    - Still defines a main() function and uses an
-      `if __name__ == "__main__":` block.
+    Fix these issues without changing logic or asserts:
 
-    Output format requirements:
-    - Return only valid Python code.
-    - Do not include any explanations, comments outside the code, or markdown
-      fences (no ``` blocks).
+    Output format:
+    - Only valid Python code.
+    - No explanations, no markdown.
     """
     return textwrap.dedent(base_prompt).strip()
 
-
 def call_gemini_for_code(description: str) -> str:
-    
-    prompt = build_prompt(description)
+    info("\n[ Mega Coder ] Contacting Gemini to generate your program...")
     model = genai.GenerativeModel(MODEL_NAME)
-
-    print("\n[ Mega Coder ] Contacting Gemini to generate your program...")
-    try:
-        response = model.generate_content(prompt)
-    except Exception as e:
-        print(f"ERROR: Gemini API call failed: {e}", file=sys.stderr)
-        sys.exit(1)
-
+    response = model.generate_content(build_prompt(description))
     if not hasattr(response, "text") or not response.text:
-        print("ERROR: Gemini returned an empty response.", file=sys.stderr)
+        error("ERROR: Gemini returned an empty response.")
         sys.exit(1)
+    return clean_code(response.text)
 
-    code = clean_code(response.text)
-    return code
-
-
-def call_gemini_to_fix_code(
-    description: str,
-    previous_code: str,
-    error_text: str,
-) -> str:
-    
-    prompt = build_fix_prompt(description, previous_code, error_text)
+def call_gemini_to_fix_code(description: str, previous_code: str, error_text: str) -> str:
+    info("[ Mega Coder ] Asking Gemini to fix the program based on the error...")
     model = genai.GenerativeModel(MODEL_NAME)
+    response = model.generate_content(build_fix_prompt(description, previous_code, error_text))
+    return clean_code(response.text)
 
-    print("[ Mega Coder ] Asking Gemini to fix the program based on the error...")
-    try:
-        response = model.generate_content(prompt)
-    except Exception as e:
-        print(f"ERROR: Gemini API call (fix) failed: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    if not hasattr(response, "text") or not response.text:
-        print("ERROR: Gemini returned an empty response when fixing.", file=sys.stderr)
-        sys.exit(1)
-
-    code = clean_code(response.text)
-    return code
-
-
-def call_gemini_to_optimize_code(
-    description: str,
-    working_code: str,
-) -> str:
-    
-    prompt = build_optimize_prompt(description, working_code)
+def call_gemini_to_optimize_code(description: str, working_code: str) -> str:
+    info("[ Mega Coder ] Asking Gemini to optimize the program for speed...")
     model = genai.GenerativeModel(MODEL_NAME)
+    response = model.generate_content(build_optimize_prompt(description, working_code))
+    return clean_code(response.text)
 
-    print("[ Mega Coder ] Asking Gemini to optimize the program for speed...")
-    try:
-        response = model.generate_content(prompt)
-    except Exception as e:
-        print(f"ERROR: Gemini API call (optimize) failed: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    if not hasattr(response, "text") or not response.text:
-        print("ERROR: Gemini returned an empty response when optimizing.",
-              file=sys.stderr)
-        sys.exit(1)
-
-    code = clean_code(response.text)
-    return code
-
-
-def call_gemini_to_fix_lint(
-    description: str,
-    current_code: str,
-    lint_output: str,
-) -> str:
-    
-    prompt = build_lint_fix_prompt(description, current_code, lint_output)
+def call_gemini_to_fix_lint(description: str, current_code: str, lint_output: str) -> str:
+    info("[ Mega Coder ] Asking Gemini to fix pylint issues...")
     model = genai.GenerativeModel(MODEL_NAME)
-
-    print("[ Mega Coder ] Asking Gemini to fix pylint issues...")
-    try:
-        response = model.generate_content(prompt)
-    except Exception as e:
-        print(f"ERROR: Gemini API call (lint-fix) failed: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    if not hasattr(response, "text") or not response.text:
-        print("ERROR: Gemini returned an empty response when fixing lint issues.",
-              file=sys.stderr)
-        sys.exit(1)
-
-    code = clean_code(response.text)
-    return code
-
+    response = model.generate_content(build_lint_fix_prompt(description, current_code, lint_output))
+    return clean_code(response.text)
 
 def maybe_corrupt_code(code: str, probability: float = 0.35) -> str:
-    
     if random.random() > probability:
-        
         return code
-
     lines = code.splitlines()
     if not lines:
         return code
-
-    
-    candidate_indices = [
-        i for i, line in enumerate(lines) if any(not ch.isspace() for ch in line)
-    ]
+    candidate_indices = [i for i, line in enumerate(lines) if any(not ch.isspace() for ch in line)]
     if not candidate_indices:
         return code
-
     line_idx = random.choice(candidate_indices)
     line = lines[line_idx]
-
-    
     non_ws_indices = [i for i, ch in enumerate(line) if not ch.isspace()]
     if not non_ws_indices:
         return code
-
     char_idx = random.choice(non_ws_indices)
-    original_char = line[char_idx]
-
-   
     replacement_options = list("abcdefghijklmnopqrstuvwxyz_+-*/%0123456789")
+    original_char = line[char_idx]
     if original_char in replacement_options and len(replacement_options) > 1:
         replacement_options.remove(original_char)
     new_char = random.choice(replacement_options)
-
     corrupted_line = line[:char_idx] + new_char + line[char_idx + 1 :]
     lines[line_idx] = corrupted_line
-
-    print(
-        f"[ Mega Coder ] (Mischief) Intentionally corrupted code at "
-        f"line {line_idx + 1}, column {char_idx + 1}."
-    )
-
+    warning(f"[ Mega Coder ] (Mischief) Corrupted code at line {line_idx + 1}, col {char_idx + 1}.")
     return "\n".join(lines)
 
-
 def write_generated_code(code: str) -> None:
-   
     with open(GENERATED_FILE, "w", encoding="utf-8") as f:
         f.write(code)
-    print(f"[ Mega Coder ] Wrote generated code to: {GENERATED_FILE}")
-
+    info(f"[ Mega Coder ] Wrote generated code to: {GENERATED_FILE}")
 
 def run_generated_code() -> tuple[bool, str, float]:
-    
-    print(f"[ Mega Coder ] Running {GENERATED_FILE} to verify it executes...")
+    info(f"[ Mega Coder ] Running {GENERATED_FILE}...")
     start = time.perf_counter()
     try:
         runpy.run_path(GENERATED_FILE, run_name="__main__")
     except Exception:
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         tb = traceback.format_exc()
-        print("\n[ Mega Coder ] ERROR: The generated program raised an exception.")
-        print("This may indicate a failed assert or a bug in the code.\n")
+        error("[ Mega Coder ] The program raised an exception.")
         print(tb)
         return False, tb, elapsed_ms
-
     elapsed_ms = (time.perf_counter() - start) * 1000.0
-    print(
-        "\n[ Mega Coder ] The generated program finished without uncaught exceptions."
-    )
-    print(
-        "If asserts are written correctly, this suggests the logic is consistent."
-    )
-    print(f"[ Mega Coder ] Execution time: {elapsed_ms:.3f} ms")
+    success("[ Mega Coder ] Program executed without errors.")
+    info(f"[ Mega Coder ] Execution time: {elapsed_ms:.3f} ms")
     return True, "", elapsed_ms
 
-
-
 def run_pylint(path: str) -> tuple[bool, str]:
-   
-    print(f"[ Mega Coder ] Running pylint on {path}...")
+    info(f"[ Mega Coder ] Running pylint on {path}...")
     try:
-        
-        result = subprocess.run(
-            ["pylint", "--disable=R,C", path],
-            capture_output=True,
-            text=True,
-        )
+        result = subprocess.run(["pylint", "--disable=R,C", path], capture_output=True, text=True)
     except FileNotFoundError:
-        print(
-            "WARNING: pylint is not installed or not on PATH. "
-            "Install it with 'pip install pylint' to enable lint checks.",
-            file=sys.stderr,
-        )
-        
+        warning("pylint not installed. Run: pip install pylint")
         return True, ""
-
     output = (result.stdout or "") + (result.stderr or "")
     ok = (result.returncode == 0)
-
     if ok:
-        print("[ Mega Coder ] pylint reports no warnings/errors.")
+        success("[ Mega Coder ] No pylint issues.")
     else:
-        print("[ Mega Coder ] pylint found warnings/errors.")
-
+        warning("[ Mega Coder ] pylint found issues.")
     return ok, output
 
-
 def lint_and_fix_code(description: str, starting_code: str) -> str:
-    
     code = starting_code
-
-    for attempt in range(1, MAX_LINT_ATTEMPTS + 1):
-        print(f"\n[ Mega Coder ] ---- Lint attempt {attempt} of {MAX_LINT_ATTEMPTS} ----")
+    for attempt in tqdm(range(1, MAX_LINT_ATTEMPTS + 1), desc="Lint attempts", unit="fix"):
+        info(f"\n[ Mega Coder ] Lint attempt {attempt} of {MAX_LINT_ATTEMPTS}")
         write_generated_code(code)
         ok, lint_output = run_pylint(GENERATED_FILE)
-
         if ok:
-            print("Amazing. No lint errors/warnings")
+            success("Amazing. No lint errors/warnings")
             return code
-
         if attempt < MAX_LINT_ATTEMPTS:
-            
             code = call_gemini_to_fix_lint(description, code, lint_output)
         else:
-            print("There are still lint errors/warnings")
-
-    
+            warning("There are still lint errors/warnings")
     write_generated_code(code)
     return code
 
-
-
 def generate_and_fix_until_ok(description: str) -> None:
-    
     code = call_gemini_for_code(description)
-
-    for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
-        print(f"\n[ Mega Coder ] ==== Attempt {attempt} of {MAX_FIX_ATTEMPTS} ====")
-
-        
+    for attempt in tqdm(range(1, MAX_FIX_ATTEMPTS + 1), desc="Fix attempts", unit="fix"):
+        info(f"\n[ Mega Coder ] Attempt {attempt} of {MAX_FIX_ATTEMPTS}")
         code_to_run = maybe_corrupt_code(code)
-
         write_generated_code(code_to_run)
-        success, error_text, elapsed_before_ms = run_generated_code()
-
-        if success:
-            print("\n[ Mega Coder ] Success! The generated program runs correctly.")
-
-            
-            optimized_code = call_gemini_to_optimize_code(description, code_to_run)
-
-            print("\n[ Mega Coder ] Testing optimized version...")
-            write_generated_code(optimized_code)
-            success_opt, error_opt, elapsed_after_ms = run_generated_code()
-
-            
-            if success_opt and elapsed_after_ms < elapsed_before_ms:
-                print(
-                    f"\nCode running time optimized! "
-                    f"It now runs in {elapsed_after_ms:.3f} milliseconds, "
-                    f"while before it was {elapsed_before_ms:.3f} milliseconds."
-                )
-                final_code = optimized_code
-            elif not success_opt:
-                print(
-                    "\n[ Mega Coder ] Optimized version failed to run correctly. "
-                    "Keeping the previous working version."
-                )
-                final_code = code_to_run
+        ok, err, before = run_generated_code()
+        if ok:
+            success("\n[ Mega Coder ] Success! Program runs.")
+            optimized = call_gemini_to_optimize_code(description, code_to_run)
+            info("\n[ Mega Coder ] Testing optimized version...")
+            write_generated_code(optimized)
+            ok_opt, _, after = run_generated_code()
+            if ok_opt and after < before:
+                success(f"\nCode optimized! {after:.3f} ms vs {before:.3f} ms")
+                final = optimized
+            elif not ok_opt:
+                warning("\n[ Mega Coder ] Optimized version failed. Keeping original.")
+                final = code_to_run
             else:
-                print(
-                    "\n[ Mega Coder ] Optimized version is not faster than the "
-                    "previous one. Keeping the previous working version."
-                )
-                final_code = code_to_run
-
-            
-            final_code = lint_and_fix_code(description, final_code)
-            
-            write_generated_code(final_code)
+                warning("\n[ Mega Coder ] Optimization not faster. Keeping original.")
+                final = code_to_run
+            final = lint_and_fix_code(description, final)
+            write_generated_code(final)
             return
-
-        
         if attempt < MAX_FIX_ATTEMPTS:
-            code = call_gemini_to_fix_code(description, code_to_run, error_text)
+            code = call_gemini_to_fix_code(description, code_to_run, err)
         else:
-           
-            print(
-                "\nSorry master, I have failed you. "
-                "I can't create this program without issues."
-            )
-
-
+            error("\nSorry master, I have failed you.")
 
 def handle_option_develop_program() -> None:
-    
-    print("\nDescribe to me which Python program you want me to develop:")
+    info("\nDescribe the Python program you want me to develop:")
     description = input("> ").strip()
     if not description:
-        print("You entered an empty description. Please try again.\n")
+        warning("You entered an empty description. Try again.\n")
         return
-
     generate_and_fix_until_ok(description)
 
-
 def menu_loop() -> None:
-    
     while True:
-        print("\nI'm Mega Coder. What would you like me to do today?")
+        info("\nI'm Mega Coder. What would you like me to do today?")
         print("1. Develop a python program.")
         print("2. Fix/change something in a Github repository.")
         print("3. Look at my screen and give me realtime coding tips.")
         choice = input("Enter your choice (1-3): ").strip()
-
         if choice == "1":
             handle_option_develop_program()
         elif choice in ("2", "3"):
-            print("Not implemented yet.\n")
+            warning("Not implemented yet.\n")
         else:
-            print("Invalid choice. Please select 1, 2, or 3.\n")
-
+            warning("Invalid choice. Please select 1, 2, or 3.\n")
 
 def main() -> None:
-    
     if len(sys.argv) > 1:
-        print(
-            "This program does not accept command line arguments. "
-            "Run it simply as: python mega_coder.py",
-            file=sys.stderr,
-        )
+        error("This program does not accept command line arguments.")
         sys.exit(1)
-
+    colorama_init(autoreset=True)
     configure_gemini()
     menu_loop()
-
 
 if __name__ == "__main__":
     main()
