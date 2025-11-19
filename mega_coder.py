@@ -11,25 +11,32 @@ import subprocess
 
 from colorama import Fore, Style, init as colorama_init
 from tqdm import tqdm
+from gitingest import ingest as gitingest_ingest
 
 import google.generativeai as genai
 
 MODEL_NAME = "gemini-2.5-flash-lite"
+PRO_MODEL_NAME = "gemini-2.5-pro"
 GENERATED_FILE = "generated-code-gemini.py"
 MAX_FIX_ATTEMPTS = 5
 MAX_LINT_ATTEMPTS = 3
 
+
 def info(msg: str) -> None:
     print(Fore.CYAN + msg + Style.RESET_ALL)
+
 
 def success(msg: str) -> None:
     print(Fore.GREEN + msg + Style.RESET_ALL)
 
+
 def warning(msg: str) -> None:
     print(Fore.YELLOW + msg + Style.RESET_ALL)
 
+
 def error(msg: str) -> None:
     print(Fore.RED + msg + Style.RESET_ALL)
+
 
 def configure_gemini() -> None:
     api_key = os.getenv("GOOGLE_API_KEY")
@@ -37,6 +44,7 @@ def configure_gemini() -> None:
         error("ERROR: Please set the environment variable GOOGLE_API_KEY with your Gemini API key.")
         sys.exit(1)
     genai.configure(api_key=api_key)
+
 
 def clean_code(text: str) -> str:
     code = text.strip()
@@ -48,6 +56,7 @@ def clean_code(text: str) -> str:
         if "```" in code:
             code = code.rsplit("```", 1)[0]
     return code.strip()
+
 
 def build_prompt(user_description: str) -> str:
     base_prompt = f"""
@@ -77,6 +86,7 @@ def build_prompt(user_description: str) -> str:
       fences (no ``` blocks).
     """
     return textwrap.dedent(base_prompt).strip()
+
 
 def build_fix_prompt(user_description: str, previous_code: str, error_text: str) -> str:
     base_prompt = f"""
@@ -115,6 +125,7 @@ def build_fix_prompt(user_description: str, previous_code: str, error_text: str)
     """
     return textwrap.dedent(base_prompt).strip()
 
+
 def build_optimize_prompt(user_description: str, working_code: str) -> str:
     base_prompt = f"""
     You are an expert Python 3 performance engineer.
@@ -140,6 +151,7 @@ def build_optimize_prompt(user_description: str, working_code: str) -> str:
     """
     return textwrap.dedent(base_prompt).strip()
 
+
 def build_lint_fix_prompt(user_description: str, current_code: str, lint_output: str) -> str:
     base_prompt = f"""
     You are an expert Python 3 developer and style expert.
@@ -158,6 +170,7 @@ def build_lint_fix_prompt(user_description: str, current_code: str, lint_output:
     """
     return textwrap.dedent(base_prompt).strip()
 
+
 def call_gemini_for_code(description: str) -> str:
     info("\n[ Mega Coder ] Contacting Gemini to generate your program...")
     model = genai.GenerativeModel(MODEL_NAME)
@@ -167,11 +180,13 @@ def call_gemini_for_code(description: str) -> str:
         sys.exit(1)
     return clean_code(response.text)
 
+
 def call_gemini_to_fix_code(description: str, previous_code: str, error_text: str) -> str:
     info("[ Mega Coder ] Asking Gemini to fix the program based on the error...")
     model = genai.GenerativeModel(MODEL_NAME)
     response = model.generate_content(build_fix_prompt(description, previous_code, error_text))
     return clean_code(response.text)
+
 
 def call_gemini_to_optimize_code(description: str, working_code: str) -> str:
     info("[ Mega Coder ] Asking Gemini to optimize the program for speed...")
@@ -179,11 +194,13 @@ def call_gemini_to_optimize_code(description: str, working_code: str) -> str:
     response = model.generate_content(build_optimize_prompt(description, working_code))
     return clean_code(response.text)
 
+
 def call_gemini_to_fix_lint(description: str, current_code: str, lint_output: str) -> str:
     info("[ Mega Coder ] Asking Gemini to fix pylint issues...")
     model = genai.GenerativeModel(MODEL_NAME)
     response = model.generate_content(build_lint_fix_prompt(description, current_code, lint_output))
     return clean_code(response.text)
+
 
 def maybe_corrupt_code(code: str, probability: float = 0.35) -> str:
     if random.random() > probability:
@@ -210,10 +227,12 @@ def maybe_corrupt_code(code: str, probability: float = 0.35) -> str:
     warning(f"[ Mega Coder ] (Mischief) Corrupted code at line {line_idx + 1}, col {char_idx + 1}.")
     return "\n".join(lines)
 
+
 def write_generated_code(code: str) -> None:
     with open(GENERATED_FILE, "w", encoding="utf-8") as f:
         f.write(code)
     info(f"[ Mega Coder ] Wrote generated code to: {GENERATED_FILE}")
+
 
 def run_generated_code() -> tuple[bool, str, float]:
     info(f"[ Mega Coder ] Running {GENERATED_FILE}...")
@@ -231,6 +250,7 @@ def run_generated_code() -> tuple[bool, str, float]:
     info(f"[ Mega Coder ] Execution time: {elapsed_ms:.3f} ms")
     return True, "", elapsed_ms
 
+
 def run_pylint(path: str) -> tuple[bool, str]:
     info(f"[ Mega Coder ] Running pylint on {path}...")
     try:
@@ -245,6 +265,7 @@ def run_pylint(path: str) -> tuple[bool, str]:
     else:
         warning("[ Mega Coder ] pylint found issues.")
     return ok, output
+
 
 def lint_and_fix_code(description: str, starting_code: str) -> str:
     code = starting_code
@@ -261,6 +282,7 @@ def lint_and_fix_code(description: str, starting_code: str) -> str:
             warning("There are still lint errors/warnings")
     write_generated_code(code)
     return code
+
 
 def generate_and_fix_until_ok(description: str) -> None:
     code = call_gemini_for_code(description)
@@ -292,6 +314,7 @@ def generate_and_fix_until_ok(description: str) -> None:
         else:
             error("\nSorry master, I have failed you.")
 
+
 def handle_option_develop_program() -> None:
     info("\nDescribe the Python program you want me to develop:")
     description = input("> ").strip()
@@ -299,6 +322,74 @@ def handle_option_develop_program() -> None:
         warning("You entered an empty description. Try again.\n")
         return
     generate_and_fix_until_ok(description)
+
+
+def handle_option_github_repository() -> None:
+    info("\nGive me the full url of a public github repository:")
+    repo_url = input("> ").strip()
+    if not repo_url:
+        warning("You entered an empty URL. Please try again.\n")
+        return
+
+    info("Tell me what you want me to fix/change/explain in that repository")
+    instructions = input("> ").strip()
+    if not instructions:
+        warning("You entered empty instructions. Please try again.\n")
+        return
+
+    try:
+        info("[ Mega Coder ] Ingesting repository with gitingest (this may take a bit)...")
+        summary, tree, content = gitingest_ingest(repo_url)
+    except Exception as exc:
+        error(f"[ Mega Coder ] Failed to ingest repository: {exc}")
+        return
+
+    repo_text = (
+        "repository summary:\n"
+        + summary
+        + "\n\nrepository structure:\n"
+        + tree
+        + "\n\nsource code content:\n"
+        + content
+    )
+
+    prompt = f"""
+You are an expert senior software engineer.
+
+You are given a text digest of a GitHub repository and a user request.
+
+GitHub repository digest:
+{repo_text}
+
+User request:
+{instructions}
+
+Your task:
+- Focus only on the parts of the repository that are relevant to the user request.
+- Explain clearly what you would change/fix/adjust.
+- If you propose code changes, show concrete code snippets and mention the file paths.
+- If relevant, explain the reasoning behind your changes in a concise way.
+"""
+
+    model = genai.GenerativeModel(PRO_MODEL_NAME)
+    info("[ Mega Coder ] Asking Gemini 2.5 Pro about the repository...")
+
+    try:
+        response = model.generate_content(prompt)
+    except Exception as e:
+        error(f"[ Mega Coder ] Gemini 2.5 Pro call failed: {e}")
+        return
+
+    text = getattr(response, "text", "") or ""
+    if not text:
+        warning("[ Mega Coder ] Gemini 2.5 Pro returned an empty response.")
+        return
+
+    print()
+    success("=== Gemini 2.5 Pro response ===")
+    print(text)
+    print()
+
 
 def menu_loop() -> None:
     while True:
@@ -309,10 +400,13 @@ def menu_loop() -> None:
         choice = input("Enter your choice (1-3): ").strip()
         if choice == "1":
             handle_option_develop_program()
-        elif choice in ("2", "3"):
+        elif choice == "2":
+            handle_option_github_repository()
+        elif choice == "3":
             warning("Not implemented yet.\n")
         else:
             warning("Invalid choice. Please select 1, 2, or 3.\n")
+
 
 def main() -> None:
     if len(sys.argv) > 1:
@@ -321,6 +415,7 @@ def main() -> None:
     colorama_init(autoreset=True)
     configure_gemini()
     menu_loop()
+
 
 if __name__ == "__main__":
     main()
