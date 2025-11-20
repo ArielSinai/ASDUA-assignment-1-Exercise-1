@@ -9,14 +9,18 @@ import random
 import time
 import subprocess
 
+import numpy as np
+import pyautogui
+from rapidocr_openvino import RapidOCR
+
 from colorama import Fore, Style, init as colorama_init
 from tqdm import tqdm
-from gitingest import ingest as gitingest_ingest
 
+from openai import OpenAI
 import google.generativeai as genai
 
 MODEL_NAME = "gemini-2.5-flash-lite"
-PRO_MODEL_NAME = "gemini-2.5-pro"
+GPT5_MODEL = "gpt-5-mini"
 GENERATED_FILE = "generated-code-gemini.py"
 MAX_FIX_ATTEMPTS = 5
 MAX_LINT_ATTEMPTS = 3
@@ -35,7 +39,7 @@ def warning(msg: str) -> None:
 
 
 def error(msg: str) -> None:
-    print(Fore.RED + msg + Style.RESET_ALL)
+    print(Fore.RED + msg + Style.RESET_ALL, file=sys.stderr)
 
 
 def configure_gemini() -> None:
@@ -44,6 +48,13 @@ def configure_gemini() -> None:
         error("ERROR: Please set the environment variable GOOGLE_API_KEY with your Gemini API key.")
         sys.exit(1)
     genai.configure(api_key=api_key)
+
+
+def get_openai_client() -> OpenAI:
+    if not os.getenv("OPENAI_API_KEY"):
+        error("ERROR: Please set OPENAI_API_KEY for GPT-5 mini.")
+        sys.exit(1)
+    return OpenAI()
 
 
 def clean_code(text: str) -> str:
@@ -97,7 +108,7 @@ def build_fix_prompt(user_description: str, previous_code: str, error_text: str)
     Program description:
     {user_description}
 
-    Here is the CURRENT version of the script that was generated:
+    Here is the current version of the script that was generated:
 
     --- BEGIN CURRENT SCRIPT ---
     {previous_code}
@@ -214,8 +225,10 @@ def maybe_corrupt_code(code: str, probability: float = 0.35) -> str:
     line_idx = random.choice(candidate_indices)
     line = lines[line_idx]
     non_ws_indices = [i for i, ch in enumerate(line) if not ch.isspace()]
+
     if not non_ws_indices:
         return code
+
     char_idx = random.choice(non_ws_indices)
     replacement_options = list("abcdefghijklmnopqrstuvwxyz_+-*/%0123456789")
     original_char = line[char_idx]
@@ -259,7 +272,7 @@ def run_pylint(path: str) -> tuple[bool, str]:
         warning("pylint not installed. Run: pip install pylint")
         return True, ""
     output = (result.stdout or "") + (result.stderr or "")
-    ok = (result.returncode == 0)
+    ok = result.returncode == 0
     if ok:
         success("[ Mega Coder ] No pylint issues.")
     else:
@@ -324,71 +337,73 @@ def handle_option_develop_program() -> None:
     generate_and_fix_until_ok(description)
 
 
-def handle_option_github_repository() -> None:
-    info("\nGive me the full url of a public github repository:")
-    repo_url = input("> ").strip()
-    if not repo_url:
-        warning("You entered an empty URL. Please try again.\n")
-        return
-
-    info("Tell me what you want me to fix/change/explain in that repository")
-    instructions = input("> ").strip()
-    if not instructions:
-        warning("You entered empty instructions. Please try again.\n")
-        return
-
-    try:
-        info("[ Mega Coder ] Ingesting repository with gitingest (this may take a bit)...")
-        summary, tree, content = gitingest_ingest(repo_url)
-    except Exception as exc:
-        error(f"[ Mega Coder ] Failed to ingest repository: {exc}")
-        return
-
-    repo_text = (
-        "repository summary:\n"
-        + summary
-        + "\n\nrepository structure:\n"
-        + tree
-        + "\n\nsource code content:\n"
-        + content
+def looks_like_code(text: str) -> bool:
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return False
+    indicators = (
+        "def ", "class ", "import ", "for ", "while ", "if ",
+        "return ", "#include", ";", "{", "}", "=>", "print("
     )
+    score = 0
+    for ln in lines:
+        if any(tok in ln for tok in indicators):
+            score += 1
+    return score >= 3
 
-    prompt = f"""
-You are an expert senior software engineer.
 
-You are given a text digest of a GitHub repository and a user request.
+def call_gpt5_mini_tips(client: OpenAI, code_text: str) -> str:
+    prompt = (
+        "You are an expert programming assistant.\n"
+        "The user is currently editing the following code seen on their screen:\n\n"
+        f"{code_text}\n\n"
+        "Give concise, practical suggestions (max 5 bullet points) "
+        "to improve readability, performance, and correctness."
+    )
+    resp = client.responses.create(
+        model=GPT5_MODEL,
+        input=prompt,
+    )
+    return resp.output_text
 
-GitHub repository digest:
-{repo_text}
 
-User request:
-{instructions}
-
-Your task:
-- Focus only on the parts of the repository that are relevant to the user request.
-- Explain clearly what you would change/fix/adjust.
-- If you propose code changes, show concrete code snippets and mention the file paths.
-- If relevant, explain the reasoning behind your changes in a concise way.
-"""
-
-    model = genai.GenerativeModel(PRO_MODEL_NAME)
-    info("[ Mega Coder ] Asking Gemini 2.5 Pro about the repository...")
-
+def handle_option_live_tips() -> None:
+    info("\nPerfect. Show me your screen and I will be giving you tips on how to improve the code I see.")
+    ocr_engine = RapidOCR()
+    client = get_openai_client()
+    last_code_text = ""
     try:
-        response = model.generate_content(prompt)
-    except Exception as e:
-        error(f"[ Mega Coder ] Gemini 2.5 Pro call failed: {e}")
-        return
-
-    text = getattr(response, "text", "") or ""
-    if not text:
-        warning("[ Mega Coder ] Gemini 2.5 Pro returned an empty response.")
-        return
-
-    print()
-    success("=== Gemini 2.5 Pro response ===")
-    print(text)
-    print()
+        while True:
+            screenshot = pyautogui.screenshot()
+            img = np.array(screenshot)
+            result, _ = ocr_engine(img)
+            if not result:
+                time.sleep(1.0)
+                continue
+            texts = []
+            for item in result:
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    texts.append(str(item[1]))
+                else:
+                    texts.append(str(item))
+            combined = "\n".join(texts).strip()
+            if not combined:
+                time.sleep(1.0)
+                continue
+            if not looks_like_code(combined):
+                time.sleep(1.0)
+                continue
+            if combined == last_code_text:
+                time.sleep(1.0)
+                continue
+            last_code_text = combined
+            info("\n[ Mega Coder ] Detected code on screen. Asking GPT-5 mini for tips...")
+            tips = call_gpt5_mini_tips(client, combined)
+            success("\n[ Mega Coder ] Tips for the code I see on your screen:")
+            print(tips)
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        warning("\n[ Mega Coder ] Stopped live screen analysis.")
 
 
 def menu_loop() -> None:
@@ -401,9 +416,9 @@ def menu_loop() -> None:
         if choice == "1":
             handle_option_develop_program()
         elif choice == "2":
-            handle_option_github_repository()
-        elif choice == "3":
             warning("Not implemented yet.\n")
+        elif choice == "3":
+            handle_option_live_tips()
         else:
             warning("Invalid choice. Please select 1, 2, or 3.\n")
 
