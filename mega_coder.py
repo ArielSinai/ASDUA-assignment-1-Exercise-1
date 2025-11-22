@@ -18,6 +18,7 @@ from tqdm import tqdm
 
 from openai import OpenAI
 import google.generativeai as genai
+from gitingest import ingest
 
 MODEL_NAME = "gemini-2.5-flash-lite"
 GPT5_MODEL = "gpt-5-mini"
@@ -78,12 +79,18 @@ def get_openai_client() -> OpenAI:
 
 
 def clean_code(text: str) -> str:
+    """
+    Take a text response from an LLM and try to strip markdown fences
+    and explanations, keeping only the code.
+    """
     code = text.strip()
     if code.startswith("```"):
+        # Strip leading backticks and optional language tag
         code = code.lstrip("`")
         parts = code.split("\n", 1)
         if len(parts) == 2:
             code = parts[1]
+        # Remove trailing fence if exists
         if "```" in code:
             code = code.rsplit("```", 1)[0]
     return code.strip()
@@ -91,31 +98,30 @@ def clean_code(text: str) -> str:
 
 def build_prompt(user_description: str) -> str:
     base_prompt = f"""
-    You are an expert Python 3 developer.
+You are an expert Python 3 developer.
 
-    Write a complete, runnable Python 3 script that does the following:
-    {user_description}
+Write a complete, runnable Python 3 script that does EXACTLY the following task:
 
-    Hard requirements:
-    - The program must be a single, self-contained Python file.
-    - The program must not use input() or any other interactive user input.
-    - The program must not rely on command line arguments (no sys.argv parsing).
-    - Instead, define any example data or configuration directly in the script
-      so it can run from `python {GENERATED_FILE}` without stopping.
+{user_description}
 
-    Structure requirements:
-    - Define a main() function that performs the main logic.
-    - Add an `if __name__ == "__main__":` block that calls main().
-    - Add several assert statements that verify the core logic of the program.
-      These asserts should raise an AssertionError if the logic is wrong.
-      Place them in a reasonable place in the code (e.g., in main() or in
-      dedicated test/helper functions).
+Hard requirements:
+- The program must be a single, self-contained Python file.
+- The program must not use input() or any other interactive user input.
+- The program must not rely on command line arguments (no sys.argv parsing).
+- Define any example data or configuration directly in the script so it can run
+  from `python {GENERATED_FILE}` without stopping.
 
-    Output format requirements:
-    - Return only valid Python code.
-    - Do not include any explanations, comments outside the code, or markdown
-      fences (no ``` blocks).
-    """
+Structure requirements:
+- Define a main() function that performs the main logic.
+- Add an `if __name__ == "__main__":` block that calls main().
+- Add several assert statements that verify the core logic of the program.
+  These asserts should raise AssertionError if the logic is wrong.
+
+Output format requirements:
+- Return ONLY valid Python code.
+- Do NOT wrap the code in markdown fences (no ```).
+- Do NOT add any explanation text. Only the code.
+"""
     return textwrap.dedent(base_prompt).strip()
 
 
@@ -125,65 +131,65 @@ def build_fix_prompt(
     error_text: str,
 ) -> str:
     base_prompt = f"""
-    You are an expert Python 3 developer.
+You are an expert Python 3 developer.
 
-    I previously asked you to implement the following Python program:
+I previously asked you to implement the following Python program:
 
-    Program description:
-    {user_description}
+Program description:
+{user_description}
 
-    Here is the current version of the script that was generated:
+Here is the current version of the script that was generated:
 
-    --- BEGIN CURRENT SCRIPT ---
-    {previous_code}
-    --- END CURRENT SCRIPT ---
+--- BEGIN CURRENT SCRIPT ---
+{previous_code}
+--- END CURRENT SCRIPT ---
 
-    When I run this script, I get the following error/traceback:
+When I run this script, I get the following error/traceback:
 
-    --- BEGIN ERROR ---
-    {error_text}
-    --- END ERROR ---
+--- BEGIN ERROR ---
+{error_text}
+--- END ERROR ---
 
-    Please provide a fully corrected version of the script that:
-    - Fixes the error(s) above.
-    - Still satisfies the original requirements and description.
-    - Does not use input() or any other interactive user input.
-    - Does not rely on command line arguments (no sys.argv parsing).
-    - Keeps a main() function and an `if __name__ == "__main__":` block.
-    - Contains assert statements that check the core logic and will fail if the
-      logic is wrong.
+Please provide a fully corrected version of the script that:
+- Fixes the error(s) above.
+- Still satisfies the original requirements and description.
+- Does not use input() or any other interactive user input.
+- Does not rely on command line arguments (no sys.argv parsing).
+- Keeps a main() function and an `if __name__ == "__main__":` block.
+- Contains assert statements that check the core logic and will fail if the
+  logic is wrong.
 
-    Output format requirements:
-    - Return ONLY valid Python code.
-    - Do not include any explanations, comments outside the code, or markdown
-      fences (no ``` blocks).
-    """
+Output format requirements:
+- Return ONLY valid Python code.
+- Do NOT include any explanations, comments outside the code, or markdown
+  fences (no ``` blocks).
+"""
     return textwrap.dedent(base_prompt).strip()
 
 
 def build_optimize_prompt(user_description: str, working_code: str) -> str:
     base_prompt = f"""
-    You are an expert Python 3 performance engineer.
+You are an expert Python 3 performance engineer.
 
-    I have the following Python 3 script that already works correctly and
-    includes assert statements that validate the logic:
+I have the following Python 3 script that already works correctly and
+includes assert statements that validate the logic:
 
-    --- BEGIN CURRENT SCRIPT ---
-    {working_code}
-    --- END CURRENT SCRIPT ---
+--- BEGIN CURRENT SCRIPT ---
+{working_code}
+--- END CURRENT SCRIPT ---
 
-    Original program description:
-    {user_description}
+Original program description:
+{user_description}
 
-    Please produce a new version of this script that:
-    - Is more efficient / faster in terms of execution time.
-    - Preserves exactly the same assert statements.
+Please produce a new version of this script that:
+- Is more efficient / faster in terms of execution time.
+- Preserves exactly the same assert statements.
 
-    Output format requirements:
-    - Return only valid Python code.
-    - Do not include any explanations, comments outside the code, or markdown
-      fences (no ``` blocks).
-    """
+Output format requirements:
+- Return ONLY valid Python code.
+- Do NOT include any explanations, comments outside the code, or markdown
+  fences (no ``` blocks).
+"""
     return textwrap.dedent(base_prompt).strip()
 
 
@@ -193,20 +199,29 @@ def build_lint_fix_prompt(
     lint_output: str,
 ) -> str:
     base_prompt = f"""
-    You are an expert Python 3 developer and style expert.
+You are an expert Python 3 developer and style expert.
 
-    I ran pylint on this script and got the following warnings/errors:
+I have this Python 3 script:
 
-    --- BEGIN PYLINT OUTPUT ---
-    {lint_output}
-    --- END PYLINT OUTPUT ---
+--- BEGIN CURRENT SCRIPT ---
+{current_code}
+--- END CURRENT SCRIPT ---
 
-    Fix these issues without changing logic or asserts:
+Program description:
+{user_description}
 
-    Output format:
-    - Only valid Python code.
-    - No explanations, no markdown.
-    """
+I ran pylint on this script and got the following warnings/errors:
+
+--- BEGIN PYLINT OUTPUT ---
+{lint_output}
+--- END PYLINT OUTPUT ---
+
+Fix these issues without changing the logic or the assert statements.
+
+Output format:
+- Return ONLY valid Python code.
+- No explanations, no markdown.
+"""
     return textwrap.dedent(base_prompt).strip()
 
 
@@ -214,10 +229,14 @@ def call_gemini_for_code(description: str) -> str:
     info("\n[ Mega Coder ] Contacting Gemini to generate your program...")
     model = genai.GenerativeModel(MODEL_NAME)
     response = model.generate_content(build_prompt(description))
-    if not hasattr(response, "text") or not response.text:
+
+    raw_text = getattr(response, "text", "") or ""
+    if not raw_text:
         error("ERROR: Gemini returned an empty response.")
         sys.exit(1)
-    return clean_code(response.text)
+
+    code = clean_code(raw_text)
+    return code
 
 
 def call_gemini_to_fix_code(
@@ -390,7 +409,9 @@ def generate_and_fix_until_ok(description: str) -> None:
             ok_opt, _, after = run_generated_code()
 
             if ok_opt and after < before:
-                success(f"\nCode optimized! {after:.3f} ms vs {before:.3f} ms")
+                success(
+                    f"\nCode optimized! {after:.3f} ms vs {before:.3f} ms"
+                )
                 final = optimized
             elif not ok_opt:
                 warning(
@@ -411,6 +432,7 @@ def generate_and_fix_until_ok(description: str) -> None:
             code = call_gemini_to_fix_code(description, code_to_run, err)
         else:
             error("\nSorry master, I have failed you.")
+            return
 
 
 def handle_option_develop_program() -> None:
@@ -520,6 +542,61 @@ def handle_option_live_tips() -> None:
         warning("\n[ Mega Coder ] Stopped live screen analysis.")
 
 
+def handle_option_github_repo() -> None:
+    info("\nGive me the full url of a public github repository:")
+    repo_url = input("> ").strip()
+    if not repo_url:
+        warning("Empty URL, aborting.\n")
+        return
+
+    info("Tell me what you want me to fix/change/explain in that repository:")
+    instructions = input("> ").strip()
+    if not instructions:
+        warning("Empty instructions, aborting.\n")
+        return
+
+    try:
+        info("[ Mega Coder ] Using gitingest to fetch repository contents...")
+        repo_text = ingest(repo_url)
+    except Exception as exc:
+        error(f"[ Mega Coder ] Failed to ingest repository: {exc}")
+        return
+
+    info("[ Mega Coder ] Asking Gemini 2.5 Pro for help with this repository...")
+
+    model = genai.GenerativeModel("gemini-2.5-pro")
+
+    prompt = f"""
+You are an expert software engineer.
+
+You get the text representation of a GitHub repository and a user request
+about what they want to fix/change/explain.
+
+Repository (may be long):
+{repo_text}
+
+User request:
+{instructions}
+
+Respond with clear, concrete, and actionable guidance.
+If code changes are needed, show them explicitly.
+"""
+
+    try:
+        response = model.generate_content(prompt)
+    except Exception as exc:
+        error(f"[ Mega Coder ] Gemini 2.5 Pro call failed: {exc}")
+        return
+
+    text = getattr(response, "text", "") or ""
+    if not text:
+        warning("[ Mega Coder ] Gemini 2.5 Pro returned an empty response.")
+        return
+
+    success("\n[ Mega Coder ] Here is what I suggest for this repository:\n")
+    print(text)
+
+
 def menu_loop() -> None:
     while True:
         separator()
@@ -542,7 +619,7 @@ def menu_loop() -> None:
         if choice == "1":
             handle_option_develop_program()
         elif choice == "2":
-            warning("Not implemented yet.\n")
+            handle_option_github_repo()
         elif choice == "3":
             handle_option_live_tips()
         else:
